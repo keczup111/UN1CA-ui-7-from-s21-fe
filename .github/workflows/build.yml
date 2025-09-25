@@ -10,10 +10,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    # Ustawienie limitu czasu (opcjonalne, ale zalecane dla długich kompilacji)
+    timeout-minutes: 360 
 
     strategy:
       fail-fast: false
       matrix:
+        # Lista kodów urządzeń
         target: [a52q, a52sxq, a52xq, a71, a72q, a73xq, b0q, dm1q, dm2q, dm3q, g0q, m52xq, r0q, r8q, r9q, r9q2]
 
     steps:
@@ -22,6 +25,7 @@ jobs:
         with:
           submodules: 'recursive'
 
+      # --- Kroki optymalizacji miejsca na dysku (zachowane) ---
       - name: Free disk space (1/3)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -37,6 +41,7 @@ jobs:
         uses: rokibhasansagar/slimhub_actions@main
         with:
           retain: 'compiler_cmake'
+      # --------------------------------------------------------
 
       - name: Set up build environment
         run: |
@@ -48,6 +53,8 @@ jobs:
           sudo modprobe erofs f2fs
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Wymaga, aby pliki kluczy znajdowały się w folderze 'security' w głównym repozytorium
+          mkdir -p security
           echo -n "${{ secrets.PLATFORM_KEY_PK8 }}" | base64 --decode > security/unica_platform.pk8
           echo -n "${{ secrets.PLATFORM_KEY_PEM }}" | base64 --decode > security/unica_platform.x509.pem
 
@@ -73,7 +80,45 @@ jobs:
           source ./buildenv.sh ${{ matrix.target }}
           ./scripts/extract_fw.sh
 
-      - name: Build ROM
+      # --- Zmodyfikowany Krok Kompilacji ---
+      - name: Build ROM (Tworzenie pliku .zip)
         run: |
           source ./buildenv.sh ${{ matrix.target }}
-          ./scripts/make_rom.sh --no-rom-zip --no-rom-tar
+          # Usunięto flagi --no-rom-zip i --no-rom-tar, aby utworzyć gotowy plik ZIP/TAR
+          ./scripts/make_rom.sh
+      # ------------------------------------
+
+      # --- NOWY KROK: Przesyłanie na Gofile ---
+      - name: Upload to Gofile
+        env:
+          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }} # Wymagany Token API Gofile w Secrets!
+          TARGET_DEVICE: ${{ matrix.target }}
+        run: |
+          # Ścieżka do pliku wynikowego ROM-u (należy dostosować, jeśli jest inna)
+          ROM_PATH="$(pwd)/output/${{ matrix.target }}/*.zip"
+          ROM_FILE=$(ls -t $ROM_PATH | head -n 1) # Znajdź najnowszy plik ZIP
+          
+          if [ -f "$ROM_FILE" ]; then
+            echo "Znaleziono plik ROM-u: $ROM_FILE. Przesyłanie na Gofile..."
+            
+            # Pobranie akcji gofile-uploader (można użyć innego narzędzia lub skryptu cURL)
+            GOFILE_UPLOAD_URL="https://api.gofile.io/uploadFile?token=$GOFILE_TOKEN&folderId=YOUR_TARGET_FOLDER_ID" # Zmień na swój folder ID!
+
+            UPLOAD_RESPONSE=$(curl -s -F "file=@$ROM_FILE" "$GOFILE_UPLOAD_URL")
+            
+            # Wypisanie linku (zakładając poprawny format odpowiedzi JSON)
+            echo "Odpowiedź Gofile:"
+            echo "$UPLOAD_RESPONSE"
+            DOWNLOAD_LINK=$(echo $UPLOAD_RESPONSE | jq -r '.data.downloadPage') # Wymaga 'jq'
+            
+            if [ -n "$DOWNLOAD_LINK" ] && [ "$DOWNLOAD_LINK" != "null" ]; then
+              echo "✅ Pomyślnie przesłano. Link do pobrania: $DOWNLOAD_LINK"
+            else
+              echo "❌ Błąd podczas przesyłania lub nie udało się uzyskać linku do pobrania."
+              # Nie przerywamy, ale błąd jest odnotowany
+            fi
+          else
+            echo "❌ Nie znaleziono pliku ROM-u w ścieżce: $ROM_PATH. Sprawdź skrypt make_rom.sh."
+            exit 1 # Błąd krytyczny, jeśli plik nie powstał
+          fi
+      # ----------------------------------------
